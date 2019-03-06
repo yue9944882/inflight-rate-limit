@@ -1,29 +1,44 @@
 package main
 
 import (
-	inflight "github.com/yue9944882/inflight-rate-limit"
-	"gopkg.in/yaml.v2"
 	"io/ioutil"
 	"net/http"
 	"log"
+
+	inflight "github.com/yue9944882/inflight-rate-limit"
+	"gopkg.in/yaml.v2"
+	"os"
+	"path/filepath"
+	"flag"
+	"fmt"
 )
 
 func main() {
 
-	bkts := loadBuckets()
-	bindings := loadBindings()
+	workingDir, err := os.Getwd()
+	if err != nil {
+		panic(err)
+	}
+
+	exampleDir := flag.String("example-dir", workingDir, "a string")
+	flag.Parse()
+
+
+	fmt.Printf("Reading examples at %v\n", *exampleDir)
+	bkts := loadBuckets(*exampleDir)
+	bindings := loadBindings(*exampleDir)
 
 	inflightFilter := inflight.NewInflightRateLimitFilter(bkts, bindings)
 
-	go inflightFilter.Drainer.Run()
-	go inflightFilter.Collector.Run()
+	inflightFilter.Run()
 
 	http.HandleFunc("/", inflightFilter.Serve)
+	fmt.Printf("Serving at 127.0.0.1:8080\n")
 	log.Fatal(http.ListenAndServe(":8080", nil))
 }
 
-func loadBuckets() []*inflight.Bucket {
-	data, err := ioutil.ReadFile("buckets.yaml")
+func loadBuckets(dir string) []*inflight.Bucket {
+	data, err := ioutil.ReadFile(filepath.Join(dir, "buckets.yaml"))
 	if err != nil {
 		panic(err)
 	}
@@ -34,8 +49,8 @@ func loadBuckets() []*inflight.Bucket {
 	return buckets
 }
 
-func loadBindings() []*inflight.BucketBinding {
-	data, err := ioutil.ReadFile("bindings.yaml")
+func loadBindings(dir string) []*inflight.BucketBinding {
+	data, err := ioutil.ReadFile(filepath.Join(dir, "bindings.yaml"))
 	if err != nil {
 		panic(err)
 	}

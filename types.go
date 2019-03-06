@@ -8,8 +8,16 @@ const (
 	SystemMediumPriorityBand
 	SystemNormalPorityBand
 	SystemLowPriorityBand
+
+	// This is an implicit priority that cannot be set via API
 	SystemLowestPriorityBand
 )
+
+var ExtraBucket = &Bucket{
+	Name:          "__extra",
+	SharedQuota:   10,
+	Priority:      SystemLowestPriorityBand,
+}
 
 type Bucket struct {
 	Name string `yaml:"name"`

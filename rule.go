@@ -2,12 +2,6 @@ package inflight
 
 import "net/http"
 
-var ExtraBucket = &Bucket{
-	Name:        "__extra",
-	SharedQuota: 10,
-	Priority:    SystemLowestPriorityBand,
-}
-
 type subject struct {
 	username  string
 	namespace string

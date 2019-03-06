@@ -5,38 +5,65 @@ import (
 	"math/rand"
 )
 
-type QueueDrainer struct {
-	QuotaChannel <-chan func()
-
-	QueueByPriority map[PriorityBand]*WRRQueue
+type queueDrainer struct {
+	lock                         *sync.Mutex
+	queueLength                  int
+	maxQueueLength               int
+	quotaReleasingFuncByPriority map[PriorityBand][]func()
+	queueByPriorities            map[PriorityBand]*WRRQueue
 }
 
-func (d *QueueDrainer) Run() {
+func (d *queueDrainer) Run() {
 	for {
-		select {
-		case quotaFinishFunc := <-d.QuotaChannel:
-			d.process(quotaFinishFunc)
-		}
-	}
-}
+		for i := int(SystemTopPriorityBand); i <= int(SystemLowestPriorityBand); i++ {
+			func() {
+				d.lock.Lock()
+				defer d.lock.Unlock()
 
-func (d *QueueDrainer) process(quotaFinishFunc func()) {
-	for i := 0; i <= int(SystemLowestPriorityBand); i++ {
-		if distributionCh := d.QueueByPriority[PriorityBand(i)].dequeue(); distributionCh != nil {
-			go func() {
-				distributionCh <- struct{}{}
-				quotaFinishFunc()
+				length := len(d.quotaReleasingFuncByPriority[PriorityBand(i)])
+				if length == 0 {
+					return
+				}
+				finishFunc := d.quotaReleasingFuncByPriority[PriorityBand(i)][0]
+
+				for j := int(SystemTopPriorityBand); j <= i; j++ {
+					distributionCh := d.Pop(PriorityBand(j))
+					if distributionCh != nil {
+						go func() {
+							distributionCh <- finishFunc
+						}()
+						d.queueLength--
+						return
+					}
+				}
+				// re-claim the quota
+				d.quotaReleasingFuncByPriority[PriorityBand(i)] = append(d.quotaReleasingFuncByPriority[PriorityBand(i)], finishFunc)
 			}()
-			return
 		}
 	}
-	quotaFinishFunc()
 }
 
-func (d *QueueDrainer) Enqueue(bkt *Bucket) <-chan struct{} {
+func (d *queueDrainer) Receive(notification quotaNotification) {
+	d.lock.Lock()
+	defer d.lock.Unlock()
+	d.quotaReleasingFuncByPriority[notification.priority] = append(
+		d.quotaReleasingFuncByPriority[notification.priority], notification.finishFunc)
+}
+
+func (d *queueDrainer) Pop(band PriorityBand) chan<- func() {
+	return d.queueByPriorities[band].dequeue()
+}
+
+func (d *queueDrainer) Enqueue(bkt *Bucket) <-chan func() {
+	d.lock.Lock()
+	defer d.lock.Unlock()
+	if d.queueLength > d.maxQueueLength {
+		return nil
+	}
 	// Prioritizing
-	distributionCh := make(chan struct{})
-	d.QueueByPriority[bkt.Priority].enqueue(bkt.Name, distributionCh)
+	d.queueLength++
+	distributionCh := make(chan func(), 1)
+	d.queueByPriorities[bkt.Priority].enqueue(bkt.Name, distributionCh)
 	return distributionCh
 }
 
@@ -59,14 +86,14 @@ type WRRQueue struct {
 	queues  map[string][]interface{}
 }
 
-func (q *WRRQueue) enqueue(queueIdentifier string, distributionCh chan<- struct{}) {
+func (q *WRRQueue) enqueue(queueIdentifier string, distributionCh chan<- func()) {
 	q.lock.Lock()
 	defer q.lock.Unlock()
 	// Distributing
 	q.queues[queueIdentifier] = append(q.queues[queueIdentifier], distributionCh)
 }
 
-func (q *WRRQueue) dequeue() (distributionCh chan<- struct{}) {
+func (q *WRRQueue) dequeue() (distributionCh chan<- func()) {
 	// TODO: optimize time cost to Log(N) here by applying segment tree algorithm
 	q.lock.Lock()
 	defer q.lock.Unlock()
@@ -91,7 +118,7 @@ func (q *WRRQueue) dequeue() (distributionCh chan<- struct{}) {
 		}
 		distributionPtr += w
 		if randomPtr <= distributionPtr {
-			distributionCh, q.queues[id] = q.queues[id][0].(chan<- struct{}), q.queues[id][1:]
+			distributionCh, q.queues[id] = q.queues[id][0].(chan<- func()), q.queues[id][1:]
 			return distributionCh
 		}
 	}

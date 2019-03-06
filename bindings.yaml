@@ -1,8 +1,0 @@
-- bucketRef:
-    name: foo1
-  rules:
-  - field: user.name
-    values:
-    - kevin
-    - martin
-    - johm

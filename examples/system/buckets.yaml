@@ -1,0 +1,5 @@
+- name: top-system
+  reservedQuota: 10
+  sharedQuota: 20
+  weight: 10
+  priority: 0

@@ -1,0 +1,8 @@
+- bucketRef:
+    name: top-system
+  rules:
+  - field: user.name
+    values:
+    - system:scheduler
+    - system:apiserver
+    - system:controller-manager
