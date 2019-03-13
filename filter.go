@@ -3,18 +3,18 @@ package inflight
 import (
 	"fmt"
 	"net/http"
-	"sync"
 	"time"
 )
 
 type InflightRateLimitFilter struct {
 	// list-watching API models
-	buckets                    map[string]*Bucket
-	bucketBindingsByPriorities map[PriorityBand][]*BucketBinding
+	bucketsLister        []*Bucket
+	bucketBindingsLister []*BucketBinding
 
 	// running components
 	*reservedQuotaManager
 	*sharedQuotaManager
+	*queueDrainer
 
 	Delegate http.HandlerFunc
 }
@@ -22,23 +22,15 @@ type InflightRateLimitFilter struct {
 func (f *InflightRateLimitFilter) Serve(resp http.ResponseWriter, req *http.Request) {
 
 	// 0. Matching request w/ bindings API
-	matchedBkt := findMatchedBucket(req, f.buckets, f.bucketBindingsByPriorities)
+	matchedBkt := findMatchedBucket(req, f.bucketsLister, f.bucketBindingsLister)
 
-	// 1. Try to acquire reserving quota
-	finishFunc := f.reservedQuotaManager.Guarantee(matchedBkt)
-	if finishFunc != nil {
-		defer finishFunc()
-		fmt.Println("guaranteed.")
-		f.Delegate(resp, req)
-		return
-	}
-
-	// 2. Waiting to be distributed
-	distributionCh := f.drainer.Enqueue(matchedBkt)
+	// 1. Waiting to be notified by either a reserved quota or a shared quota
+	distributionCh := f.queueDrainer.Enqueue(matchedBkt)
 	if distributionCh == nil {
 		// too many requests
 		resp.WriteHeader(409)
 	}
+
 	ticker := time.NewTicker(maxTimeout)
 	defer ticker.Stop()
 	select {
@@ -66,67 +58,16 @@ func NewInflightRateLimitFilter(bkts []*Bucket, bindings []*BucketBinding) *Infl
 	}
 
 	// 2. Initializing everything
-	bucketsByName := make(map[string]*Bucket)
-	bindingsByPriority := make(map[PriorityBand][]*BucketBinding)
-	wrrQueueByPriority := make(map[PriorityBand]*WRRQueue)
-
-	totalSharedQuota := 0
-	sharedQuotaByPriority := make(map[PriorityBand]int)
-	for _, bkt := range bkts {
-		bkt := bkt
-		sharedQuotaByPriority[bkt.Priority] += bkt.SharedQuota
-		totalSharedQuota += bkt.SharedQuota
-	}
-
-	remainingSharedQuotasByBucket := make(map[string]int)
-	remainingReservedQuotasByBucket := make(map[string]int)
-
-	for _, bkt := range bkts {
-		bkt := bkt
-		bucketsByName[bkt.Name] = bkt
-		remainingReservedQuotasByBucket[bkt.Name] = bkt.ReservedQuota
-		remainingSharedQuotasByBucket[bkt.Name] = bkt.SharedQuota
-	}
-
-	fmt.Printf("*Queue drainer*: Distributing %v shared quotas\n", totalSharedQuota)
-
-	for _, binding := range bindings {
-		binding := binding
-		bindingsByPriority[bucketsByName[binding.BucketRef.Name].Priority] = append(bindingsByPriority[bucketsByName[binding.BucketRef.Name].Priority], binding)
-	}
-
-	drainer := &queueDrainer{
-		lock:                         &sync.Mutex{},
-		maxQueueLength:               totalSharedQuota,
-		queueByPriorities:            wrrQueueByPriority,
-		quotaReleasingFuncByPriority: make(map[PriorityBand][]func()),
-	}
-
-	var quotaProducers []*quotaProducer
-	for i := 0; i <= int(SystemLowestPriorityBand); i++ {
-		wrrQueueByPriority[PriorityBand(i)] = NewWRRQueue(bkts)
-		quotaProducers = append(quotaProducers, &quotaProducer{
-			lock:                 &sync.Mutex{},
-			priority:             PriorityBand(i),
-			remainingSharedQuota: sharedQuotaByPriority[PriorityBand(i)],
-			drainer:              drainer,
-		})
-	}
-
-	// run
+	quotaCh := make(chan interface{})
+	drainer := newQueueDrainer(bkts, quotaCh)
 	inflightFilter := &InflightRateLimitFilter{
-		buckets:                    bucketsByName,
-		bucketBindingsByPriorities: bindingsByPriority,
+		bucketsLister:        bkts,
+		bucketBindingsLister: bindings,
 
+		queueDrainer: drainer,
 
-		sharedQuotaManager: &sharedQuotaManager{
-			producers: quotaProducers,
-			drainer:   drainer,
-		},
-		reservedQuotaManager: &reservedQuotaManager{
-			lock:                             &sync.Mutex{},
-			remainingReservedQuotasByBuckets: remainingReservedQuotasByBucket,
-		},
+		sharedQuotaManager:   newSharedQuotaManager(quotaCh, bkts, drainer),
+		reservedQuotaManager: newReservedQuotaManager(quotaCh, bkts, drainer),
 
 		Delegate: func(resp http.ResponseWriter, req *http.Request) {
 			time.Sleep(time.Millisecond * 100) // assuming that it takes 100ms to finish the request
@@ -138,9 +79,7 @@ func NewInflightRateLimitFilter(bkts []*Bucket, bindings []*BucketBinding) *Infl
 }
 
 func (f *InflightRateLimitFilter) Run() {
-	go f.drainer.Run()
-	for _, producer := range f.producers {
-		producer := producer
-		go producer.Run()
-	}
+	go f.reservedQuotaManager.Run()
+	go f.sharedQuotaManager.Run()
+	go f.queueDrainer.Run()
 }

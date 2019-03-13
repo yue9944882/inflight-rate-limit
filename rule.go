@@ -16,12 +16,15 @@ func getSubject(req *http.Request) *subject {
 	}
 }
 
-func findMatchedBucket(req *http.Request, bktByName map[string]*Bucket, bktBindingsByPriority map[PriorityBand][]*BucketBinding) *Bucket {
+func findMatchedBucket(req *http.Request, bkts []*Bucket, bindings []*BucketBinding) *Bucket {
 	sub := getSubject(req)
-	for i := 0; i <= int(SystemLowestPriorityBand); i++ {
-		for _, binding := range bktBindingsByPriority[PriorityBand(i)] {
-			if match(sub, binding) {
-				return bktByName[binding.BucketRef.Name]
+	// TODO: optimize time cost here
+	for _, binding := range bindings {
+		if match(sub, binding) {
+			for _, bkt := range bkts {
+				if bkt.Name == binding.BucketRef.Name {
+					return bkt
+				}
 			}
 		}
 	}

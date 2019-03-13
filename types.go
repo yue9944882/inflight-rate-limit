@@ -14,9 +14,9 @@ const (
 )
 
 var ExtraBucket = &Bucket{
-	Name:          "__extra",
-	SharedQuota:   10,
-	Priority:      SystemLowestPriorityBand,
+	Name:        "__extra",
+	SharedQuota: 10,
+	Priority:    SystemLowestPriorityBand,
 }
 
 type Bucket struct {

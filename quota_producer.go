@@ -2,40 +2,44 @@ package inflight
 
 import (
 	"sync"
-	"time"
 )
 
+type sharedQuotaNotification struct {
+	priority         PriorityBand
+	quotaReleaseFunc func()
+}
+
+type reservedQuotaNotification struct {
+	priority         PriorityBand
+	bktName          string
+	quotaReleaseFunc func()
+}
+
 type quotaProducer struct {
-	lock *sync.Mutex
-
-	priority PriorityBand
-
-	remainingSharedQuota int
-
-	drainer *queueDrainer
+	lock           *sync.Mutex
+	bktByName      map[string]*Bucket
+	remainingQuota map[string]int
+	drainer        *queueDrainer
 }
 
-type quotaNotification struct {
-	priority   PriorityBand
-	finishFunc func()
-}
-
-func (c *quotaProducer) Run() {
+func (c *quotaProducer) Run(quotaProcessFunc func(bkt *Bucket, quotaReleaseFunc func())) {
 	for {
-		if c.remainingSharedQuota > 0 {
-			c.lock.Lock()
-			c.remainingSharedQuota--
-			c.lock.Unlock()
-			c.drainer.Receive(quotaNotification{
-				priority: c.priority,
-				finishFunc: func() {
+		for name, bkt := range c.bktByName {
+			func() {
+				c.lock.Lock()
+				defer c.lock.Unlock()
+				if c.remainingQuota[name] > 0 {
+					c.remainingQuota[bkt.Name]--
+				}
+			}()
+			quotaProcessFunc(
+				bkt,
+				func() {
 					c.lock.Lock()
 					defer c.lock.Unlock()
-					c.remainingSharedQuota++
-				},
-			})
-		} else {
-			time.Sleep(20 * time.Millisecond)
+					c.remainingQuota[bkt.Name]++
+				})
 		}
+
 	}
 }

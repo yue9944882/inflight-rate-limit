@@ -3,55 +3,92 @@ package inflight
 import (
 	"sync"
 	"math/rand"
+	"time"
 )
 
+func newQueueDrainer(bkts []*Bucket, quotaCh <-chan interface{}) *queueDrainer {
+	wrrQueueByPriority := make(map[PriorityBand]*WRRQueue)
+
+	totalSharedQuota := 0
+	sharedQuotaByPriority := make(map[PriorityBand]int)
+	for _, bkt := range bkts {
+		bkt := bkt
+		sharedQuotaByPriority[bkt.Priority] += bkt.SharedQuota
+		totalSharedQuota += bkt.SharedQuota
+	}
+
+	for i := 0; i <= int(SystemLowestPriorityBand); i++ {
+		wrrQueueByPriority[PriorityBand(i)] = NewWRRQueue(bkts)
+	}
+
+	drainer := &queueDrainer{
+		lock:              &sync.Mutex{},
+		maxQueueLength:    totalSharedQuota,
+		queueByPriorities: wrrQueueByPriority,
+		quotaCh:           quotaCh,
+	}
+	return drainer
+}
+
 type queueDrainer struct {
-	lock                         *sync.Mutex
-	queueLength                  int
-	maxQueueLength               int
-	quotaReleasingFuncByPriority map[PriorityBand][]func()
-	queueByPriorities            map[PriorityBand]*WRRQueue
+	lock           *sync.Mutex
+	queueLength    int
+	maxQueueLength int
+
+	quotaCh <-chan interface{}
+
+	queueByPriorities map[PriorityBand]*WRRQueue
 }
 
 func (d *queueDrainer) Run() {
 	for {
-		for i := int(SystemTopPriorityBand); i <= int(SystemLowestPriorityBand); i++ {
+		if d.queueLength == 0 {
+			// HACK: avoid racing empty queue
+			time.Sleep(time.Millisecond * 20)
+		}
+		quota := <-d.quotaCh
+		switch quota := quota.(type) {
+		case reservedQuotaNotification:
 			func() {
 				d.lock.Lock()
 				defer d.lock.Unlock()
-
-				length := len(d.quotaReleasingFuncByPriority[PriorityBand(i)])
-				if length == 0 {
+				distributionCh := d.PopByPriorityAndBucketName(quota.priority, quota.bktName)
+				if distributionCh != nil {
+					go func() {
+						distributionCh <- quota.quotaReleaseFunc
+					}()
+					d.queueLength--
 					return
+				} else {
+					quota.quotaReleaseFunc()
 				}
-				finishFunc := d.quotaReleasingFuncByPriority[PriorityBand(i)][0]
-
-				for j := int(SystemTopPriorityBand); j <= i; j++ {
-					distributionCh := d.Pop(PriorityBand(j))
+			}()
+		case sharedQuotaNotification:
+			func() {
+				d.lock.Lock()
+				defer d.lock.Unlock()
+				for j := int(SystemTopPriorityBand); j <= int(quota.priority); j++ {
+					distributionCh := d.PopByPriority(quota.priority)
 					if distributionCh != nil {
 						go func() {
-							distributionCh <- finishFunc
+							distributionCh <- quota.quotaReleaseFunc
 						}()
 						d.queueLength--
 						return
 					}
 				}
-				// re-claim the quota
-				d.quotaReleasingFuncByPriority[PriorityBand(i)] = append(d.quotaReleasingFuncByPriority[PriorityBand(i)], finishFunc)
+				quota.quotaReleaseFunc()
 			}()
 		}
 	}
 }
 
-func (d *queueDrainer) Receive(notification quotaNotification) {
-	d.lock.Lock()
-	defer d.lock.Unlock()
-	d.quotaReleasingFuncByPriority[notification.priority] = append(
-		d.quotaReleasingFuncByPriority[notification.priority], notification.finishFunc)
+func (d *queueDrainer) PopByPriority(band PriorityBand) (releaseQuotaFuncCh chan<- func()) {
+	return d.queueByPriorities[band].dequeue()
 }
 
-func (d *queueDrainer) Pop(band PriorityBand) chan<- func() {
-	return d.queueByPriorities[band].dequeue()
+func (d *queueDrainer) PopByPriorityAndBucketName(band PriorityBand, bktName string) (releaseQuotaFuncCh chan<- func()) {
+	return d.queueByPriorities[band].dequeueDirectly(bktName)
 }
 
 func (d *queueDrainer) Enqueue(bkt *Bucket) <-chan func() {
@@ -86,11 +123,11 @@ type WRRQueue struct {
 	queues  map[string][]interface{}
 }
 
-func (q *WRRQueue) enqueue(queueIdentifier string, distributionCh chan<- func()) {
+func (q *WRRQueue) enqueue(key string, distributionCh chan<- func()) {
 	q.lock.Lock()
 	defer q.lock.Unlock()
 	// Distributing
-	q.queues[queueIdentifier] = append(q.queues[queueIdentifier], distributionCh)
+	q.queues[key] = append(q.queues[key], distributionCh)
 }
 
 func (q *WRRQueue) dequeue() (distributionCh chan<- func()) {
@@ -124,4 +161,14 @@ func (q *WRRQueue) dequeue() (distributionCh chan<- func()) {
 	}
 
 	return nil
+}
+
+func (q *WRRQueue) dequeueDirectly(key string) (distributeCh chan<- func()) {
+	q.lock.Lock()
+	defer q.lock.Unlock()
+	if len(q.queues[key]) == 0 {
+		return nil
+	}
+	distributeCh, q.queues[key] = q.queues[key][0].(chan<- func()), q.queues[key][1:]
+	return
 }
