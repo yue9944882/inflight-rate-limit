@@ -19,26 +19,30 @@ type quotaProducer struct {
 	lock           *sync.Mutex
 	bktByName      map[string]*Bucket
 	remainingQuota map[string]int
-	drainer        *queueDrainer
 }
 
 func (c *quotaProducer) Run(quotaProcessFunc func(bkt *Bucket, quotaReleaseFunc func())) {
 	for {
 		for name, bkt := range c.bktByName {
+			bkt := bkt
+			gotQuota := false
 			func() {
 				c.lock.Lock()
 				defer c.lock.Unlock()
 				if c.remainingQuota[name] > 0 {
 					c.remainingQuota[bkt.Name]--
+					gotQuota = true
 				}
 			}()
-			quotaProcessFunc(
-				bkt,
-				func() {
-					c.lock.Lock()
-					defer c.lock.Unlock()
-					c.remainingQuota[bkt.Name]++
-				})
+			if gotQuota {
+				quotaProcessFunc(
+					bkt,
+					func() {
+						c.lock.Lock()
+						defer c.lock.Unlock()
+						c.remainingQuota[bkt.Name]++
+					})
+			}
 		}
 
 	}

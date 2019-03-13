@@ -35,7 +35,6 @@ func (f *InflightRateLimitFilter) Serve(resp http.ResponseWriter, req *http.Requ
 	defer ticker.Stop()
 	select {
 	case finishFunc := <-distributionCh:
-		fmt.Println("distributed.")
 		defer finishFunc()
 		f.Delegate(resp, req)
 	case <-ticker.C:
@@ -66,8 +65,8 @@ func NewInflightRateLimitFilter(bkts []*Bucket, bindings []*BucketBinding) *Infl
 
 		queueDrainer: drainer,
 
-		sharedQuotaManager:   newSharedQuotaManager(quotaCh, bkts, drainer),
-		reservedQuotaManager: newReservedQuotaManager(quotaCh, bkts, drainer),
+		sharedQuotaManager:   newSharedQuotaManager(quotaCh, bkts),
+		reservedQuotaManager: newReservedQuotaManager(quotaCh, bkts),
 
 		Delegate: func(resp http.ResponseWriter, req *http.Request) {
 			time.Sleep(time.Millisecond * 100) // assuming that it takes 100ms to finish the request
@@ -80,6 +79,6 @@ func NewInflightRateLimitFilter(bkts []*Bucket, bindings []*BucketBinding) *Infl
 
 func (f *InflightRateLimitFilter) Run() {
 	go f.reservedQuotaManager.Run()
-	go f.sharedQuotaManager.Run()
+	// go f.sharedQuotaManager.Run()
 	go f.queueDrainer.Run()
 }

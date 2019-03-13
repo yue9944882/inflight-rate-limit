@@ -15,7 +15,8 @@ const (
 
 var ExtraBucket = &Bucket{
 	Name:        "__extra",
-	SharedQuota: 10,
+	ReservedQuota: 1,
+	SharedQuota: 1,
 	Priority:    SystemLowestPriorityBand,
 }
 

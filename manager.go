@@ -6,24 +6,22 @@ import (
 
 type reservedQuotaManager struct {
 	producer *quotaProducer
-	drainer  *queueDrainer
 	quotaCh  chan<- interface{}
 }
 
-func newReservedQuotaManager(quotaCh chan<- interface{}, bkts []*Bucket, drainer *queueDrainer) *reservedQuotaManager {
+func newReservedQuotaManager(quotaCh chan<- interface{}, bkts []*Bucket) *reservedQuotaManager {
 	mgr := &reservedQuotaManager{
-		drainer: drainer,
 		producer: &quotaProducer{
 			lock:           &sync.Mutex{},
 			remainingQuota: make(map[string]int),
 			bktByName:      make(map[string]*Bucket),
-			drainer:        drainer,
 		},
 		quotaCh: quotaCh,
 	}
 	for _, bkt := range bkts {
 		bkt := bkt
 		mgr.producer.remainingQuota[bkt.Name] += bkt.ReservedQuota
+		mgr.producer.bktByName[bkt.Name] = bkt
 	}
 	return mgr
 }
@@ -38,16 +36,14 @@ func (m *reservedQuotaManager) Run() {
 	})
 }
 
-func newSharedQuotaManager(quotaCh chan<- interface{}, bkts []*Bucket, drainer *queueDrainer) *sharedQuotaManager {
+func newSharedQuotaManager(quotaCh chan<- interface{}, bkts []*Bucket) *sharedQuotaManager {
 	mgr := &sharedQuotaManager{
-		drainer:   drainer,
 		producers: make(map[PriorityBand]*quotaProducer),
 		quotaCh:   quotaCh,
 	}
 	for i := 0; i <= int(SystemLowestPriorityBand); i++ {
 		mgr.producers[PriorityBand(i)] = &quotaProducer{
 			lock:           &sync.Mutex{},
-			drainer:        drainer,
 			remainingQuota: make(map[string]int),
 			bktByName:      make(map[string]*Bucket),
 		}
@@ -62,7 +58,6 @@ func newSharedQuotaManager(quotaCh chan<- interface{}, bkts []*Bucket, drainer *
 
 type sharedQuotaManager struct {
 	producers map[PriorityBand]*quotaProducer
-	drainer   *queueDrainer
 	quotaCh   chan<- interface{}
 }
 

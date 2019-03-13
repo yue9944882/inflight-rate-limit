@@ -4,6 +4,7 @@ import (
 	"sync"
 	"math/rand"
 	"time"
+	"fmt"
 )
 
 func newQueueDrainer(bkts []*Bucket, quotaCh <-chan interface{}) *queueDrainer {
@@ -55,6 +56,7 @@ func (d *queueDrainer) Run() {
 				distributionCh := d.PopByPriorityAndBucketName(quota.priority, quota.bktName)
 				if distributionCh != nil {
 					go func() {
+						fmt.Println("reserved.")
 						distributionCh <- quota.quotaReleaseFunc
 					}()
 					d.queueLength--
@@ -71,6 +73,7 @@ func (d *queueDrainer) Run() {
 					distributionCh := d.PopByPriority(quota.priority)
 					if distributionCh != nil {
 						go func() {
+							fmt.Println("distributed.")
 							distributionCh <- quota.quotaReleaseFunc
 						}()
 						d.queueLength--
